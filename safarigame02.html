@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <title>DropMatch - 落ちものパズル</title>
+  <style>
+    :root {
+      --bg:#0f1220;
+      --panel:#171a2b;
+      --text:#e6e8f2;
+      --accent:#77e0ff;
+      --muted:#8a8fa8;
+    }
+    html,body { height:100%; }
+    body {
+      margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      background: radial-gradient(1200px 800px at 50% -10%, #1b2143, #0b0e1a 60%, #070914 100%); color:var(--text);
+      display:flex; align-items:center; justify-content:center; -webkit-user-select:none; user-select:none;
+    }
+    .wrap { width:min(92vw, 520px); }
+    .card { background:linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+            border:1px solid rgba(255,255,255,0.06); border-radius:20px; box-shadow:0 20px 60px rgba(0,0,0,.45);
+            backdrop-filter: blur(8px); padding:16px; }
+    h1 { font-size:20px; margin:0 0 8px; letter-spacing:0.02em; display:flex; align-items:center; gap:8px; }
+    .badge { font-size:12px; color:#0b1520; background:var(--accent); padding:2px 8px; border-radius:999px; }
+    .toprow { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .stats { display:flex; gap:12px; align-items:baseline; }
+    .stats div { font-variant-numeric: tabular-nums; color:var(--muted); }
+    .stats b { color:var(--text); font-size:18px; }
+    .screen { display:grid; grid-template-columns: 1fr; gap:12px; }
+    canvas { width:100%; height:auto; background: #0a0d1b; border-radius:14px; border:1px solid rgba(255,255,255,0.06); display:block; }
+
+    .buttons { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; }
+    .btn { background:var(--panel); border:1px solid rgba(255,255,255,0.08); color:var(--text);
+           padding:12px 10px; border-radius:14px; font-weight:600; letter-spacing:0.04em; text-align:center;
+           box-shadow:inset 0 -2px 0 rgba(255,255,255,0.05); }
+    .btn:active { transform: translateY(1px); }
+
+    .row2 { display:flex; gap:10px; margin-top:8px; }
+    .grow { flex:1; }
+    .hint { color:var(--muted); font-size:12px; line-height:1.4; margin-top:6px; }
+    .footer { text-align:center; color:var(--muted); font-size:12px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card screen">
+      <div class="toprow">
+        <h1>DropMatch <span class="badge">Web</span></h1>
+        <div class="stats">
+          <div>Score<br><b id="score">0</b></div>
+          <div>Level<br><b id="level">1</b></div>
+          <div>Lines<br><b id="lines">0</b></div>
+        </div>
+      </div>
+      <canvas id="game" width="360" height="640" aria-label="game"></canvas>
+      <div class="buttons" role="group" aria-label="controls">
+        <button class="btn" id="left" aria-label="left">◀︎ 左</button>
+        <button class="btn" id="drop" aria-label="drop">↓ 落下</button>
+        <button class="btn" id="right" aria-label="right">右 ▶︎</button>
+      </div>
+      <div class="row2">
+        <button class="btn grow" id="pause">⏸ 一時停止</button>
+        <button class="btn grow" id="restart">⟲ リスタート</button>
+      </div>
+      <div class="hint">
+        3個以上の同色がつながると消えます（上下左右連結）。スマホはボタン、PCは← → ↓ キーに対応。<br />
+        Safari / iOSでそのまま遊べます。
+      </div>
+    </div>
+    <div class="footer">© 2025</div>
+  </div>
+
+<script>
+(() => {
+  // ==== 基本設定 ====
+  const COLS = 10;
+  const ROWS = 20;
+  const BORDER = 2; // セルの枠
+  const COLORS = [
+    '#6ee7ff', '#7df082', '#ffe073', '#ff9b73', '#cfa6ff', '#ff6e9a'
+  ];
+
+  // ==== キャンバスとスケール ====
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let dpr = 1;
+
+  function fitCanvas() {
+    // iOS Safariで clientWidth が 0 になる対策
+    const rect = canvas.getBoundingClientRect();
+    const cssW = Math.max(1, rect.width || canvas.offsetWidth || 360);
+    const cssH = Math.max(1, rect.height || (cssW * (canvas.height / canvas.width)));
+    dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const w = Math.floor(cssW * dpr);
+    const h = Math.floor(cssH * dpr);
+    canvas.width = w; canvas.height = h;
+    cellSize = Math.max(8, Math.floor(Math.min(w / COLS, h / ROWS)));
+    offsetX = Math.floor((w - cellSize * COLS)/2);
+    offsetY = Math.floor((h - cellSize * ROWS)/2);
+    draw();
+  }
+
+  // iOSでの初期レイアウト未完了対策（ResizeObserver + DOMContentLoaded）
+  let ro;
+  function watchResize(){
+    try {
+      ro = new ResizeObserver(() => fitCanvas());
+      ro.observe(canvas);
+    } catch(e) { /* iOS 12系など未対応 */ }
+    window.addEventListener('resize', fitCanvas, { passive: true });
+  }
+
+  let cellSize = 16, offsetX = 0, offsetY = 0;
+
+  // ==== グリッド ====
+  const grid = new Array(ROWS).fill(null).map(()=>new Array(COLS).fill(null));
+
+  function randomColor(){ return COLORS[(Math.random() * COLORS.length)|0]; }
+
+  let current = null; // {x,y,color}
+  let nextColor = randomColor();
+
+  function spawn() {
+    const color = nextColor; // 先読み色
+    nextColor = randomColor();
+    current = { x: (COLS/2)|0, y: -1, color };
+    if (collides(current.x, current.y+1)) {
+      running = false; gameOver = true;
+    }
+  }
+
+  function collides(nx, ny) {
+    if (ny >= ROWS) return true;
+    if (nx < 0 || nx >= COLS) return true;
+    if (ny >= 0 && grid[ny][nx]) return true;
+    return false;
+  }
+
+  function lockPiece() {
+    if (current.y >= 0) {
+      grid[current.y][current.x] = current.color;
+    } else {
+      running = false; gameOver = true; return;
+    }
+    const cleared = clearMatches();
+    if (cleared > 0) {
+      score += cleared * 10;
+      lines += Math.max(1, (cleared/3)|0);
+      level = 1 + Math.floor(lines / 10);
+      fallInterval = Math.max(90, 650 - (level-1)*45);
+    }
+    spawn();
+  }
+
+  function neighbors(r,c){
+    const list = [];
+    if (r>0) list.push([r-1,c]);
+    if (r<ROWS-1) list.push([r+1,c]);
+    if (c>0) list.push([r,c-1]);
+    if (c<COLS-1) list.push([r,c+1]);
+    return list;
+  }
+
+  function clearMatches() {
+    const visited = Array.from({length: ROWS}, ()=>Array(COLS).fill(false));
+    const toClear = [];
+    for (let r=0;r<ROWS;r++){
+      for (let c=0;c<COLS;c++){
+        const color = grid[r][c];
+        if (!color || visited[r][c]) continue;
+        const q=[[r,c]]; visited[r][c]=true;
+        const comp=[[r,c]];
+        while(q.length){
+          const [rr,cc]=q.shift();
+          for(const [nr,nc] of neighbors(rr,cc)){
+            if(!visited[nr][nc] && grid[nr][nc]===color){
+              visited[nr][nc]=true; q.push([nr,nc]); comp.push([nr,nc]);
+            }
+          }
+        }
+        if (comp.length>=3) toClear.push(...comp);
+      }
+    }
+    if (toClear.length===0) return 0;
+    for (const [r,c] of toClear) grid[r][c]=null;
+    for (let c=0;c<COLS;c++){
+      let write = ROWS-1;
+      for (let r=ROWS-1;r>=0;r--){
+        if (grid[r][c]){ grid[write][c]=grid[r][c]; if (write!==r) grid[r][c]=null; write--; }
+      }
+    }
+    return toClear.length + clearMatches();
+  }
+
+  // ==== 入力 ====
+  function move(dx){
+    if (!current) return;
+    const nx = current.x + dx;
+    if (!collides(nx, current.y)) current.x = nx;
+  }
+  function softDrop(){
+    if (!current) return;
+    const ny = current.y + 1;
+    if (!collides(current.x, ny)) current.y = ny; else lockPiece();
+  }
+  function hardDrop(){
+    if (!current) return;
+    while(!collides(current.x, current.y+1)) current.y++;
+    lockPiece();
+  }
+
+  const btnL = document.getElementById('left');
+  const btnR = document.getElementById('right');
+  const btnD = document.getElementById('drop');
+
+  function bindControls(){
+    const passiveFalse = {passive:false};
+    btnL.addEventListener('touchstart', e=>{ e.preventDefault(); move(-1); draw(); }, passiveFalse);
+    btnR.addEventListener('touchstart', e=>{ e.preventDefault(); move(1); draw(); }, passiveFalse);
+    btnD.addEventListener('touchstart', e=>{ e.preventDefault(); hardDrop(); draw(); }, passiveFalse);
+    btnL.addEventListener('click', ()=>{ move(-1); });
+    btnR.addEventListener('click', ()=>{ move(1); });
+    btnD.addEventListener('click', ()=>{ hardDrop(); });
+
+    window.addEventListener('keydown', e=>{
+      if (gameOver) return;
+      if (e.key==='ArrowLeft') { move(-1); }
+      else if (e.key==='ArrowRight') { move(1); }
+      else if (e.key==='ArrowDown') { softDrop(); }
+      else if (e.key===' ') { hardDrop(); }
+    });
+
+    document.getElementById('pause').addEventListener('click', ()=>{
+      if (gameOver) return;
+      paused = !paused;
+      document.getElementById('pause').textContent = paused ? '▶︎ 再開' : '⏸ 一時停止';
+    });
+    document.getElementById('restart').addEventListener('click', ()=>{ reset(); });
+
+    canvas.addEventListener('click', ()=>{ if (gameOver) reset(); });
+    canvas.addEventListener('touchstart', (e)=>{ if (gameOver){ e.preventDefault(); reset(); } }, {passive:false});
+  }
+
+  // ==== ループ ====
+  let score=0, level=1, lines=0;
+  let running=true, paused=false, gameOver=false;
+  let last = 0; // rAFの時刻
+  let acc = 0;  // 経過時間
+  let fallInterval = 650; // ms
+
+  function reset(){
+    for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++) grid[r][c]=null;
+    score=0; level=1; lines=0; updateHUD();
+    fallInterval=650; running=true; paused=false; gameOver=false; acc=0; last=0;
+    nextColor = randomColor();
+    spawn();
+    draw();
+  }
+
+  function updateHUD(){
+    document.getElementById('score').textContent=score;
+    document.getElementById('level').textContent=level;
+    document.getElementById('lines').textContent=lines;
+  }
+
+  function update(dt){
+    if (!running || paused || gameOver) return;
+    acc += dt;
+    if (acc >= fallInterval){
+      acc = 0;
+      if (!current) spawn();
+      const ny = current.y + 1;
+      if (!collides(current.x, ny)) current.y = ny; else lockPiece();
+      updateHUD();
+    }
+  }
+
+  function drawCell(x, y, color){
+    const px = offsetX + x*cellSize;
+    const py = offsetY + y*cellSize;
+    ctx.fillStyle = color;
+    ctx.fillRect(px+BORDER, py+BORDER, cellSize-2*BORDER, cellSize-2*BORDER);
+    ctx.globalAlpha = 0.2; ctx.fillStyle = '#ffffff';
+    ctx.fillRect(px+BORDER, py+BORDER, (cellSize-2*BORDER), Math.max(2, (cellSize-2*BORDER)*0.18));
+    ctx.globalAlpha = 1;
+  }
+
+  function drawGridBack(){
+    ctx.fillStyle = '#0b0f1f';
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    for (let r=0;r<=ROWS;r++){
+      const y = offsetY + r*cellSize + 0.5;
+      ctx.beginPath(); ctx.moveTo(offsetX+0.5, y); ctx.lineTo(offsetX+COLS*cellSize+0.5, y); ctx.stroke();
+    }
+    for (let c=0;c<=COLS;c++){
+      const x = offsetX + c*cellSize + 0.5;
+      ctx.beginPath(); ctx.moveTo(x, offsetY+0.5); ctx.lineTo(x, offsetY+ROWS*cellSize+0.5); ctx.stroke();
+    }
+    const w = cellSize*2.2;
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillRect(canvas.width - w - 12, 12, w, cellSize*1.6);
+    ctx.fillStyle = '#cfd3ea';
+    ctx.font = Math.floor(cellSize*0.6) + 'px system-ui';
+    ctx.fillText('NEXT', canvas.width - w - 4, 12 + cellSize*0.55);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.strokeRect(canvas.width - w - 12 + 0.5, 12 + 0.5, w, cellSize*1.6);
+
+    const nx = canvas.width - w/2 - 12 - cellSize/2;
+    const ny = 12 + cellSize*0.8;
+    ctx.save();
+    ctx.translate(nx, ny);
+    ctx.shadowColor = nextColor; ctx.shadowBlur = 12;
+    ctx.fillStyle = nextColor;
+    ctx.fillRect(-cellSize/2 + BORDER, -cellSize/2 + BORDER, cellSize-2*BORDER, cellSize-2*BORDER);
+    ctx.restore();
+  }
+
+  function draw(){
+    if (cellSize < 8) return; // レイアウト前の描画を無視
+    drawGridBack();
+    for (let r=0;r<ROWS;r++){
+      for (let c=0;c<COLS;c++){
+        const color = grid[r][c];
+        if (color) drawCell(c,r,color);
+      }
+    }
+    if (current && current.y>=0){ drawCell(current.x, current.y, current.color); }
+
+    if (gameOver){
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold ' + Math.floor(cellSize*1.4) + 'px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2);
+      ctx.font = Math.floor(cellSize*0.8) + 'px system-ui';
+      ctx.fillText('タップでリスタート', canvas.width/2, canvas.height/2 + cellSize*1.4);
+    }
+  }
+
+  function loop(ts){
+    if (!last) last = ts;
+    const dt = ts - last; last = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function start(){
+    watchResize();
+    // レイアウトが安定してから初回fit
+    setTimeout(() => { fitCanvas(); reset(); requestAnimationFrame(loop); }, 0);
+  }
+
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+</script>
+</body>
+</html>
